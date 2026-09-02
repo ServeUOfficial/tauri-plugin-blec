@@ -169,14 +169,15 @@ pub(crate) async fn recv_string<R: Runtime>(
 async fn subscribe_channel(
     characteristic: Uuid,
     service: Option<Uuid>,
-) -> Result<mpsc::Receiver<Vec<u8>>> {
+) -> Result<mpsc::UnboundedReceiver<Vec<u8>>> {
     let handler = get_handler()?;
-    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     handler
         .subscribe(characteristic, service, move |data: Vec<u8>| {
             info!("subscribe_channel: {:?}", data);
-            tx.try_send(data)
-                .expect("failed to send data to the channel");
+            if tx.send(data).is_err() {
+                warn!("Failed to queue BLE notification because the receiver is closed");
+            }
         })
         .await?;
     Ok(rx)
@@ -191,9 +192,10 @@ pub(crate) async fn subscribe<R: Runtime>(
     let mut rx = subscribe_channel(characteristic, service).await?;
     async_runtime::spawn(async move {
         while let Some(data) = rx.recv().await {
-            on_data
-                .send(data)
-                .expect("failed to send data to the front-end");
+            if let Err(e) = on_data.send(data) {
+                warn!("Failed to send BLE notification to the front-end: {e}");
+                return;
+            }
         }
     });
     Ok(())
@@ -211,9 +213,10 @@ pub(crate) async fn subscribe_string<R: Runtime>(
         while let Some(data) = rx.recv().await {
             info!("subscribe_string: {:?}", data);
             let data = String::from_utf8(data).expect("failed to convert data to string");
-            on_data
-                .send(data)
-                .expect("failed to send data to the front-end");
+            if let Err(e) = on_data.send(data) {
+                warn!("Failed to send BLE notification to the front-end: {e}");
+                return;
+            }
         }
     });
     Ok(())
